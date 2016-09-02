@@ -55,15 +55,17 @@ func (promise *CompletablePromise) Cause () error {
 // The private version of this is used for `Combine` to call, so that it won't
 // attempt to acquire the mutex twice.
 func (promise *CompletablePromise) then (compute func(interface{})interface{}) Thenable {
-    if (!promise.completed) {
+    if !promise.completed {
         andThen := completable(compute, nil)
 
         promise.dependencies = append(promise.dependencies, andThen)
 
         return andThen
+    } else if promise.rejected {
+        return Rejected(promise.cause)
+    } else {
+        return Completed(compute(promise.value))
     }
-
-    return Completed(compute(promise.value))
 }
 
 // Compose this promise into one which is complete when the following code has
@@ -75,9 +77,11 @@ func (promise *CompletablePromise) Then (compute func(interface{})interface{}) T
         defer promise.mutex.Unlock()
 
         return promise.then(compute)
+    } else if promise.rejected {
+        return Rejected(promise.cause)
+    } else {
+        return Completed(compute(promise.value))
     }
-
-    return Completed(compute(promise.value))
 }
 
 // Compose this promise into another one which handles an upstream error with
@@ -125,6 +129,9 @@ func panicStateComplete (rejected bool) {
 // It is considered a programming error to complete a promise multiple times.
 // The promise is to be completed once, and not thereafter.
 func (promise *CompletablePromise) Complete (value interface{}) {
+    // This should rarely actually be blocking, there's a separate mutex for
+    // each completable promise and the mutex is only acquired during assembly
+    // and completion.
     promise.mutex.Lock()
 
     defer promise.mutex.Unlock()
@@ -180,34 +187,40 @@ func (promise *CompletablePromise) Reject (err error) {
 // promise which is completed when the returned promise, and this promise, are
 // completed...but no sooner.
 func (promise *CompletablePromise) Combine (create func(interface{}) Thenable) Thenable {
-    if (promise.completed) {
-        return create(promise.value)
+    if !promise.completed {
+        promise.mutex.Lock()
+
+        defer promise.mutex.Unlock()
+
+        if !promise.completed {
+            // So, this may seem a little whacky, but what is happening here is
+            // that seeing as there is presently no value from which to generate
+            // the new promise, a callback is registered using Then() which
+            // executes the supplied transform function, and when the promise that
+            // was returned by *that* transform produces a result, it is copied
+            // over to the placeholder thus satisfying the request.
+            placeholder := Promise()
+
+            // It's important that the internal then() is used here, because the
+            // external one allocates a mutex lock. sync.Mutex is not a reentrant lock
+            // type, unfortunately.
+            promise.then(func (awaited interface{}) interface{} {
+                create(awaited).Then(func (composed interface{}) interface{} {
+                    placeholder.Complete(composed)
+
+                    return nil
+                })
+
+                return nil
+            })
+
+            return placeholder
+        }
     }
 
-    promise.mutex.Lock()
-
-    defer promise.mutex.Unlock()
-
-    // So, this may seem a little whacky, but what is happening here is that
-    // seeing as there is presently no value from which to generate the new
-    // promise, a callback is registered using Then() which executes the
-    // supplied transform function, and when the promise that was returned by
-    // *that* transform produces a result, it is copied over to the placeholder
-    // thus satisfying the request.
-    placeholder := Promise()
-
-    // It's important that the internal then() is used here, because the
-    // external one allocates a mutex lock. sync.Mutex is not a reentrant lock
-    // type, unfortunately.
-    promise.then(func (awaited interface{}) interface{} {
-        create(awaited).Then(func (composed interface{}) interface{} {
-            placeholder.Complete(composed)
-
-            return nil
-        })
-
-        return nil
-    })
-
-    return placeholder
+    if promise.rejected {
+        return Rejected(promise.cause)
+    } else {
+        return create(promise.value)
+    }
 }
