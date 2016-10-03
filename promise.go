@@ -14,84 +14,83 @@ package promise
 // value is observable with Then().
 type Thenable interface {
 
-    // Resolved determines whether or not calling Get() is safe.
-    Resolved() bool
+	// Resolved determines whether or not calling Get() is safe.
+	Resolved() bool
 
-    // Errored determines whether or not a promise has been rejected at any
-    // point.
-    Rejected() bool
+	// Errored determines whether or not a promise has been rejected at any
+	// point.
+	Rejected() bool
 
-    // Create a new Thenable which is the result of this computation and the
-    // transformation function herein.
-    // TODO This needs a way to actually give you a new promise.
-    Then(func(interface{}) interface{}) Thenable
+	// Create a new Thenable which is the result of this computation and the
+	// transformation function herein.
+	// TODO This needs a way to actually give you a new promise.
+	Then(func(interface{}) interface{}) Thenable
 
-    // Combine this thenable with another thenable.
-    // Given a function which accepts the value from this thenable, return a
-    // new Thenable that is resolved with the Thenable that is the result of
-    // the given function.
-    Combine(func(interface{}) Thenable) Thenable
+	// Combine this thenable with another thenable.
+	// Given a function which accepts the value from this thenable, return a
+	// new Thenable that is resolved with the Thenable that is the result of
+	// the given function.
+	Combine(func(interface{}) Thenable) Thenable
 
-    // Handle an error which has occurred during processing.
-    Catch(func(error)) Thenable
+	// Handle an error which has occurred during processing.
+	Catch(func(error)) Thenable
 
-    // Return the value of this now resolved Thenable.
-    // It is invalid (and possibly a programming error) to invoke this method
-    // when Resolved() returns `false`.
-    Get() interface{}
+	// Return the value of this now resolved Thenable.
+	// It is invalid (and possibly a programming error) to invoke this method
+	// when Resolved() returns `false`.
+	Get() interface{}
 
-    // Return the cause for this promise being rejected.
-    Cause() error
+	// Return the cause for this promise being rejected.
+	Cause() error
 }
 
 // A promise which can be completed.
 type Completable interface {
-    Thenable
+	Thenable
 
-    // Complete a promise.
-    Complete(interface{})
+	// Complete a promise.
+	Complete(interface{})
 
-    // Reject this promise and all of its derivatives.
-    Reject(error)
+	// Reject this promise and all of its derivatives.
+	Reject(error)
 }
 
 // Combine the given promises as a single promise which produces a slice of
 // values. Given an arbitrarily long list of promises (as variadic arguments)
 // combine all of the promises to a single promise which transforms all of the
 // results of the promises into a slice (as []interface{}).
-func All (thenables ...Thenable) Thenable {
-    var cursor Thenable
+func All(thenables ...Thenable) Thenable {
+	var cursor Thenable
 
-    for _, each := range thenables {
-        // For the first thenable, transform it's value into an array of
-        // values.
-        if cursor == nil {
-            cursor = each.Then(func (value interface{}) interface{} {
-                return []interface{} { value }
-            })
+	for _, each := range thenables {
+		// For the first thenable, transform it's value into an array of
+		// values.
+		if cursor == nil {
+			cursor = each.Then(func(value interface{}) interface{} {
+				return []interface{}{value}
+			})
 
-            continue
-        }
+			continue
+		}
 
-        // Afterward, we combine that promise and the next one, but in order to
-        // maintain referential integrity given there's no guarantees about
-        // when the combine function runs, we have to close over the value so
-        // as to copy the reference.
-        cursor = func(promise Thenable) Thenable {
-            return cursor.Combine(func (left interface{}) Thenable {
-                values, ok := left.([]interface{})
+		// Afterward, we combine that promise and the next one, but in order to
+		// maintain referential integrity given there's no guarantees about
+		// when the combine function runs, we have to close over the value so
+		// as to copy the reference.
+		cursor = func(promise Thenable) Thenable {
+			return cursor.Combine(func(left interface{}) Thenable {
+				values, ok := left.([]interface{})
 
-                if !ok {
-                    panic("Expected an array in combiner")
-                }
+				if !ok {
+					panic("Expected an array in combiner")
+				}
 
-                return each.Then(func (right interface{}) interface{} {
-                    return append(values, right)
-                })
-            })
-        }(each)
-    }
+				return each.Then(func(right interface{}) interface{} {
+					return append(values, right)
+				})
+			})
+		}(each)
+	}
 
-    return cursor
+	return cursor
 }
-
