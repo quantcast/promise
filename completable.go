@@ -45,6 +45,10 @@ func (promise *CompletablePromise) Rejected() bool {
 
 // Return the value of the promise.
 func (promise *CompletablePromise) Get() interface{} {
+	if !promise.completed {
+		panic("Thenable.Get() can only be called on a completed promise.")
+	}
+
 	return promise.value
 }
 
