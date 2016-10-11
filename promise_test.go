@@ -67,8 +67,8 @@ func TestCompletablePromise(test *testing.T) {
 		return Completed(val + 3)
 	})
 
-	/* And then something happened! */
-	promise.Complete(2)
+	/* And then something happened...in the background! */
+	go promise.Complete(2)
 
 	four, _ := squared.Get().(int)
 	five, _ := combined.Get().(int)

@@ -11,6 +11,7 @@ type CompletablePromise struct {
 	cause        error
 	value        interface{}
 	mutex        sync.Mutex
+	waitGroup    sync.WaitGroup
 	compute      func(interface{}) interface{}
 	handle       func(error)
 	dependencies []Completable
@@ -24,6 +25,7 @@ func completable(compute func(interface{}) interface{}, handle func(error)) *Com
 	completable.completed = false
 	completable.rejected = false
 	completable.dependencies = make([]Completable, 0)
+	completable.waitGroup.Add(1)
 
 	return completable
 }
@@ -46,7 +48,7 @@ func (promise *CompletablePromise) Rejected() bool {
 // Return the value of the promise.
 func (promise *CompletablePromise) Get() interface{} {
 	if !promise.completed {
-		panic("Thenable.Get() can only be called on a completed promise.")
+		promise.waitGroup.Wait()
 	}
 
 	return promise.value
@@ -153,6 +155,8 @@ func (promise *CompletablePromise) Complete(value interface{}) {
 	if composed != nil {
 		promise.value = composed
 	}
+
+	promise.waitGroup.Done()
 
 	for _, dependency := range promise.dependencies {
 		dependency.Complete(composed)
