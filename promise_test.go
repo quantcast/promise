@@ -155,6 +155,10 @@ func TestRejected(test *testing.T) {
 		dependenciesToo = true
 	})
 
+	alsoRejected := promise.Combine(func(val interface{}) Thenable {
+		return Completed(true)
+	})
+
 	promise.Reject(expected)
 
 	if !catchWorked {
@@ -168,6 +172,12 @@ func TestRejected(test *testing.T) {
 	promise.Catch(func(cause error) {
 		if cause != expected {
 			test.Fatalf("previously rejected promise did not pass on the cause")
+		}
+	})
+
+	alsoRejected.Catch(func(cause error) {
+		if cause != expected {
+			test.Fatalf("Expected combined promises to result in errors also")
 		}
 	})
 
