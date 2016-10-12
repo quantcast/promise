@@ -26,12 +26,8 @@ func (promise *CompletedPromise) Rejected() bool {
 }
 
 // Always returns the value that this promise was initialized with.
-func (promise *CompletedPromise) Get() interface{} {
-	return promise.value
-}
-
-func (promise *CompletedPromise) Cause() error {
-	return nil
+func (promise *CompletedPromise) Get() (interface{}, error) {
+	return promise.value, nil
 }
 
 // Create a completed promise for the value of this promise with the compute

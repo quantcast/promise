@@ -20,12 +20,8 @@ func (promise *RejectedPromise) Rejected() bool {
 	return true
 }
 
-func (promise *RejectedPromise) Get() interface{} {
-	return nil
-}
-
-func (promise *RejectedPromise) Cause() error {
-	return promise.cause
+func (promise *RejectedPromise) Get() (interface{}, error) {
+	return nil, promise.cause
 }
 
 func (promise *RejectedPromise) Then(compute func(interface{}) interface{}) Thenable {

@@ -45,13 +45,15 @@ func (promise *CompletablePromise) Rejected() bool {
 	return promise.rejected
 }
 
-// Return the value of the promise.
-func (promise *CompletablePromise) Get() interface{} {
+// Return the value of the promise, if it was resolved successfully, or return
+// the cause of failure if it was not. Block until the promise is either
+// completed or rejected.
+func (promise *CompletablePromise) Get() (interface{}, error) {
 	if !promise.completed {
 		promise.waitGroup.Wait()
 	}
 
-	return promise.value
+	return promise.value, promise.cause
 }
 
 func (promise *CompletablePromise) Cause() error {
@@ -168,7 +170,11 @@ func (promise *CompletablePromise) Complete(value interface{}) {
 // Reject this promise and all of its dependencies.
 // Reject this promise, and along with it all promises which were derived from
 // it.
-func (promise *CompletablePromise) Reject(err error) {
+func (promise *CompletablePromise) Reject(cause error) {
+	if cause == nil {
+		panic(fmt.Sprintf("Reject() requires a non-nil cause"))
+	}
+
 	promise.mutex.Lock()
 
 	defer promise.mutex.Unlock()
@@ -178,11 +184,13 @@ func (promise *CompletablePromise) Reject(err error) {
 	}
 
 	if promise.handle != nil {
-		promise.handle(err)
+		promise.handle(cause)
 	}
 
+	promise.waitGroup.Done()
+
 	for _, dependency := range promise.dependencies {
-		dependency.Reject(err)
+		dependency.Reject(cause)
 	}
 
 	promise.completed = true

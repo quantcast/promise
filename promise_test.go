@@ -8,7 +8,7 @@ import (
 // Ensure that the basic properties of a promise holds true if the value is
 // already resolved.
 func TestCompletedPromise(test *testing.T) {
-	value := Completed(10).Then(func(foo interface{}) interface{} {
+	value, _ := Completed(10).Then(func(foo interface{}) interface{} {
 		i, ok := foo.(int)
 
 		if !ok {
@@ -70,9 +70,13 @@ func TestCompletablePromise(test *testing.T) {
 	/* And then something happened...in the background! */
 	go promise.Complete(2)
 
-	four, _ := squared.Get().(int)
-	five, _ := combined.Get().(int)
-	sixtyfour, _ := cubed.Get().(int)
+	squaredV, _ := squared.Get()
+	combinedV, _ := combined.Get()
+	cubedV, _ := cubed.Get()
+
+	four, _ := squaredV.(int)
+	five, _ := combinedV.(int)
+	sixtyfour, _ := cubedV.(int)
 
 	if four != 4 {
 		test.Fatalf("Expected result of 2² to be 4")
@@ -91,7 +95,7 @@ func TestCompletablePromise(test *testing.T) {
 func TestAll(test *testing.T) {
 	expected := []int{1, 2}
 
-	status, _ := All(Completed(1), Completed(2)).Then(func(result interface{}) interface{} {
+	res, _ := All(Completed(1), Completed(2)).Then(func(result interface{}) interface{} {
 		// Traversing through these means first getting a slice of anonymous
 		// values...
 		values, ok := result.([]interface{})
@@ -114,7 +118,9 @@ func TestAll(test *testing.T) {
 		}
 
 		return true
-	}).Get().(bool)
+	}).Get()
+
+	status := res.(bool)
 
 	if !status {
 		test.Fatalf("Test cases did not run")

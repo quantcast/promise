@@ -35,13 +35,10 @@ type Thenable interface {
 	// Handle an error which has occurred during processing.
 	Catch(func(error)) Thenable
 
-	// Return the value of this now resolved Thenable.
-	// It is invalid (and possibly a programming error) to invoke this method
-	// when Resolved() returns `false`.
-	Get() interface{}
-
-	// Return the cause for this promise being rejected.
-	Cause() error
+	// Return the value of this Thenable, or the error which occurred.
+	// Implementations which are impure must block until the promise is either
+	// resolved or rejected.
+	Get() (interface{}, error)
 }
 
 // A promise which can be completed.
