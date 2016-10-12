@@ -56,19 +56,19 @@ func (promise *CompletablePromise) Get() (interface{}, error) {
 	return promise.value, promise.cause
 }
 
-func (promise *CompletablePromise) Cause() error {
-	return promise.cause
+func (promise *CompletablePromise) depend(compute func(interface{}) interface{}) Thenable {
+	andThen := completable(compute, nil)
+
+	promise.dependencies = append(promise.dependencies, andThen)
+
+	return andThen
 }
 
 // The private version of this is used for `Combine` to call, so that it won't
 // attempt to acquire the mutex twice.
 func (promise *CompletablePromise) then(compute func(interface{}) interface{}) Thenable {
 	if !promise.completed {
-		andThen := completable(compute, nil)
-
-		promise.dependencies = append(promise.dependencies, andThen)
-
-		return andThen
+		return promise.depend(compute)
 	} else if promise.rejected {
 		return Rejected(promise.cause)
 	} else {
@@ -193,8 +193,12 @@ func (promise *CompletablePromise) Reject(cause error) {
 		dependency.Reject(cause)
 	}
 
-	promise.completed = true
+	// Due to the fact that this code is a little racey (specifically,
+	// completed is used as a guard), the order of these assignments is
+	// important — specifically, the *completed* flag must be *last*.
+	promise.cause = cause
 	promise.rejected = true
+	promise.completed = true
 }
 
 // Combine this promise with another by applying the combinator `create` to the
@@ -220,14 +224,18 @@ func (promise *CompletablePromise) Combine(create func(interface{}) Thenable) Th
 			// It's important that the internal then() is used here, because the
 			// external one allocates a mutex lock. sync.Mutex is not a reentrant lock
 			// type, unfortunately.
-			promise.then(func(awaited interface{}) interface{} {
+			promise.depend(func(awaited interface{}) interface{} {
 				create(awaited).Then(func(composed interface{}) interface{} {
 					placeholder.Complete(composed)
 
 					return nil
+				}).Catch(func(err error) {
+					placeholder.Reject(err)
 				})
 
 				return nil
+			}).Catch(func(err error) {
+				placeholder.Reject(err)
 			})
 
 			return placeholder

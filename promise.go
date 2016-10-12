@@ -82,7 +82,7 @@ func All(thenables ...Thenable) Thenable {
 					panic("Expected an array in combiner")
 				}
 
-				return each.Then(func(right interface{}) interface{} {
+				return promise.Then(func(right interface{}) interface{} {
 					return append(values, right)
 				})
 			})

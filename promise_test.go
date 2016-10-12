@@ -165,6 +165,12 @@ func TestRejected(test *testing.T) {
 		test.Fatalf("Did not see rejected handler on dependency")
 	}
 
+	promise.Catch(func(cause error) {
+		if cause != expected {
+			test.Fatalf("previously rejected promise did not pass on the cause")
+		}
+	})
+
 	rejectedCalled := false
 
 	Rejected(expected).Catch(func(err error) {
