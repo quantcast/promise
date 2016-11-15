@@ -5,9 +5,16 @@ import (
 	"sync"
 )
 
+type State uint8
+
+const (
+	PENDING State = iota
+	FULFILLED
+	REJECTED
+)
+
 type CompletablePromise struct {
-	completed    bool
-	rejected     bool
+	state        State
 	cause        error
 	value        interface{}
 	mutex        sync.Mutex
@@ -22,8 +29,7 @@ func completable(compute func(interface{}) interface{}, handle func(error)) *Com
 
 	completable.compute = compute
 	completable.handle = handle
-	completable.completed = false
-	completable.rejected = false
+	completable.state = PENDING
 	completable.dependencies = make([]Completable, 0)
 	completable.waitGroup.Add(1)
 
@@ -38,18 +44,18 @@ func Promise() Completable {
 
 // Determine if the promise has been resolved.
 func (promise *CompletablePromise) Resolved() bool {
-	return promise.completed && !promise.rejected
+	return promise.state == FULFILLED
 }
 
 func (promise *CompletablePromise) Rejected() bool {
-	return promise.rejected
+	return promise.state == REJECTED
 }
 
 // Return the value of the promise, if it was resolved successfully, or return
 // the cause of failure if it was not. Block until the promise is either
 // completed or rejected.
 func (promise *CompletablePromise) Get() (interface{}, error) {
-	if !promise.completed {
+	if promise.state == PENDING {
 		promise.waitGroup.Wait()
 	}
 
@@ -67,41 +73,47 @@ func (promise *CompletablePromise) depend(compute func(interface{}) interface{})
 // The private version of this is used for `Combine` to call, so that it won't
 // attempt to acquire the mutex twice.
 func (promise *CompletablePromise) then(compute func(interface{}) interface{}) Thenable {
-	if !promise.completed {
+	switch promise.state {
+	case PENDING:
 		return promise.depend(compute)
-	} else if promise.rejected {
+	case REJECTED:
 		return Rejected(promise.cause)
-	} else {
+	case FULFILLED:
 		return Completed(compute(promise.value))
 	}
+
+	panic("Invalid state")
 }
 
 // Compose this promise into one which is complete when the following code has
 // executed.
 func (promise *CompletablePromise) Then(compute func(interface{}) interface{}) Thenable {
-	if !promise.completed {
+	switch promise.state {
+	case PENDING:
 		promise.mutex.Lock()
 
 		defer promise.mutex.Unlock()
 
 		return promise.then(compute)
-	} else if promise.rejected {
+	case REJECTED:
 		return Rejected(promise.cause)
-	} else {
+	case FULFILLED:
 		return Completed(compute(promise.value))
 	}
+
+	panic("Invalid state")
 }
 
 // Compose this promise into another one which handles an upstream error with
 // the given handler.
 func (promise *CompletablePromise) Catch(handle func(error)) Thenable {
-	if !promise.completed {
+	if promise.state == PENDING {
 		promise.mutex.Lock()
 
 		defer promise.mutex.Unlock()
 
 		// Double check now that we have the lock that this is still true.
-		if !promise.completed {
+		if promise.state == PENDING {
 			rejectable := completable(nil, handle)
 
 			promise.dependencies = append(promise.dependencies, rejectable)
@@ -110,7 +122,7 @@ func (promise *CompletablePromise) Catch(handle func(error)) Thenable {
 		}
 	}
 
-	if promise.rejected {
+	if promise.state == REJECTED {
 		handle(promise.cause)
 
 		return Rejected(promise.cause)
@@ -144,8 +156,8 @@ func (promise *CompletablePromise) Complete(value interface{}) {
 
 	defer promise.mutex.Unlock()
 
-	if promise.completed {
-		panicStateComplete(promise.rejected)
+	if promise.state != PENDING {
+		panicStateComplete(promise.state == REJECTED)
 	}
 
 	composed := value
@@ -164,7 +176,7 @@ func (promise *CompletablePromise) Complete(value interface{}) {
 		dependency.Complete(composed)
 	}
 
-	promise.completed = true
+	promise.state = FULFILLED
 }
 
 // Reject this promise and all of its dependencies.
@@ -179,8 +191,8 @@ func (promise *CompletablePromise) Reject(cause error) {
 
 	defer promise.mutex.Unlock()
 
-	if promise.completed {
-		panicStateComplete(promise.rejected)
+	if promise.state != PENDING {
+		panicStateComplete(promise.state == REJECTED)
 	}
 
 	if promise.handle != nil {
@@ -197,8 +209,7 @@ func (promise *CompletablePromise) Reject(cause error) {
 	// completed is used as a guard), the order of these assignments is
 	// important — specifically, the *completed* flag must be *last*.
 	promise.cause = cause
-	promise.rejected = true
-	promise.completed = true
+	promise.state = FULFILLED
 }
 
 // Combine this promise with another by applying the combinator `create` to the
@@ -207,12 +218,12 @@ func (promise *CompletablePromise) Reject(cause error) {
 // promise which is completed when the returned promise, and this promise, are
 // completed...but no sooner.
 func (promise *CompletablePromise) Combine(create func(interface{}) Thenable) Thenable {
-	if !promise.completed {
+	if promise.state == PENDING {
 		promise.mutex.Lock()
 
 		defer promise.mutex.Unlock()
 
-		if !promise.completed {
+		if promise.state == PENDING {
 			// So, this may seem a little whacky, but what is happening here is
 			// that seeing as there is presently no value from which to generate
 			// the new promise, a callback is registered using Then() which
@@ -242,7 +253,7 @@ func (promise *CompletablePromise) Combine(create func(interface{}) Thenable) Th
 		}
 	}
 
-	if promise.rejected {
+	if promise.state == REJECTED {
 		return Rejected(promise.cause)
 	} else {
 		return create(promise.value)
