@@ -2,7 +2,9 @@ package promise
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Ensure that the basic properties of a promise holds true if the value is
@@ -42,6 +44,47 @@ func TestCompletedPromise(test *testing.T) {
 	if result != true {
 		test.Fatalf("Expected result to be true!")
 	}
+}
+
+// Validate that a promise that depends on a promise may use that promise when
+// it is completed.
+func TestReentrantComplete(test *testing.T) {
+	go func() {
+		time.Sleep(5 * time.Second)
+		test.Fatalf("TestReentrantComplete appears to have deadlocked")
+	}()
+
+	a := Promise()
+	b := Promise()
+
+	b.Combine(func(value interface{}) Thenable {
+		bValue, _ := value.(int)
+
+		return a.Then(func(value interface{}) interface{} {
+			aValue, _ := value.(int)
+
+			return bValue + aValue
+		})
+	}).Then(func(value interface{}) interface{} {
+		sumValue, _ := value.(int)
+
+		if sumValue != 5 {
+			test.Fatalf("Expected sum value to be 3")
+		}
+
+		return nil
+	})
+
+	// This is the strange edge case where this occurs.  For some reason
+	// calling complete on promise A must cause Then() (or similar) on A to be
+	// called.
+	a.Then(func(value interface{}) interface{} {
+		b.Complete(3)
+
+		return nil
+	})
+
+	a.Complete(3)
 }
 
 // Ensure that the basic functions of the Promise API work for values that are
@@ -88,6 +131,95 @@ func TestCompletablePromise(test *testing.T) {
 
 	if sixtyfour != 64 {
 		test.Fatalf("Expected result of 4³ to be 64")
+	}
+
+	thenSatisfied := false
+
+	// This is already satisifed and *must* run immediately.
+	combined.Then(func(value interface{}) interface{} {
+		thenSatisfied = true
+
+		return value
+	})
+
+	if !thenSatisfied {
+		test.Fatalf("Executed completed promise.Then() to run immediately")
+	}
+
+	thenSatisfied = false
+
+	All(squared, cubed, combined).Then(
+		func(value interface{}) interface{} {
+			thenSatisfied = true
+			return nil
+		},
+	)
+
+	if !thenSatisfied {
+		test.Fatalf("Executed completed promise.All() to run immediately")
+	}
+}
+
+const (
+	WAITERS     = 100
+	LATECHEKERS = 20
+)
+
+func TestWaitgroups(test *testing.T) {
+	go func() {
+		time.Sleep(5 * time.Second)
+		test.Fatalf("TestWaitgroups appears to have deadlocked")
+	}()
+
+	promise := Promise()
+
+	var counter uint64 = 0
+
+	waiterChan := make(chan Thenable)
+
+	waiterPromises := make([]Thenable, 0, WAITERS)
+
+	// Create 100 waiters...
+	for i := 0; i < WAITERS; i++ {
+		go (func() {
+			waiterChan <- promise.Then(func(value interface{}) interface{} {
+				atomic.AddUint64(&counter, 1)
+
+				return nil
+			})
+		})()
+	}
+
+	go (func() {
+		promise.Complete(true)
+	})()
+
+	for i := 0; i < WAITERS; i++ {
+		waiterPromises = append(waiterPromises, <-waiterChan)
+	}
+
+	_, err := All(waiterPromises...).Get()
+
+	if err != nil {
+		test.Fatalf("Unexpected error: %s", err)
+	}
+
+	if counter != WAITERS {
+		test.Fatalf("Expected a recieved count of %d, observed %d",
+			WAITERS, counter)
+	}
+
+	for i := 0; i < LATECHEKERS; i++ {
+		promise.Then(func(value interface{}) interface{} {
+			atomic.AddUint64(&counter, 1)
+
+			return nil
+		})
+	}
+
+	if counter != LATECHEKERS+WAITERS {
+		test.Fatalf("Expected a recieved count of %d, observed %d",
+			LATECHEKERS+WAITERS, counter)
 	}
 }
 

@@ -145,10 +145,19 @@ func panicStateComplete(rejected bool) {
 	panic(fmt.Sprintf("%s was already called on this promise", method))
 }
 
-// Complete this promise with a given value.
-// It is considered a programming error to complete a promise multiple times.
-// The promise is to be completed once, and not thereafter.
-func (promise *CompletablePromise) Complete(value interface{}) {
+func (promise *CompletablePromise) complete(value interface{}) interface{} {
+	// Composing the value (performing any necessary mutations) before actually
+	// storing it allows this code to guarantee that even a.Then( func() {
+	// a.Then( ... ) } ) does not cause a deadlock.
+	//
+	// a.Then( func() { a.Get() } ) however, is unstoppable.
+	composed := value
+
+	if promise.compute != nil {
+		// Because this composition function
+		composed = promise.compute(value)
+	}
+
 	// This should rarely actually be blocking, there's a separate mutex for
 	// each completable promise and the mutex is only acquired during assembly
 	// and completion.
@@ -160,16 +169,25 @@ func (promise *CompletablePromise) Complete(value interface{}) {
 		panicStateComplete(promise.state == REJECTED)
 	}
 
-	composed := value
-
-	if promise.compute != nil {
-		composed = promise.compute(value)
-	}
-
 	if composed != nil {
 		promise.value = composed
 	}
 
+	return composed
+}
+
+// Complete this promise with a given value.
+// It is considered a programming error to complete a promise multiple times.
+// The promise is to be completed once, and not thereafter.
+func (promise *CompletablePromise) Complete(value interface{}) {
+	// Transition the state of this promise (which requires the lock). At this
+	// point all subsequent calls to Then() or Complete() will be called on a
+	// Completed promise, meaning they will be satisfied immediately.
+	composed := promise.complete(value)
+
+	// Which means that now the wait group can be notified and each of the
+	// subsequent promises can be completed. If this is done while the lock is
+	// held, a deadlock is possible.
 	promise.waitGroup.Done()
 
 	for _, dependency := range promise.dependencies {
