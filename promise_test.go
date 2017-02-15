@@ -2,10 +2,15 @@ package promise
 
 import (
 	"errors"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func init() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+}
 
 // Ensure that the basic properties of a promise holds true if the value is
 // already resolved.
@@ -69,7 +74,7 @@ func TestReentrantComplete(test *testing.T) {
 		sumValue, _ := value.(int)
 
 		if sumValue != 5 {
-			test.Fatalf("Expected sum value to be 3")
+			test.Fatalf("Expected sumValue(%d) to be 5", sumValue)
 		}
 
 		return nil
@@ -84,7 +89,7 @@ func TestReentrantComplete(test *testing.T) {
 		return nil
 	})
 
-	a.Complete(3)
+	a.Complete(2)
 }
 
 // Ensure that the basic functions of the Promise API work for values that are
@@ -166,11 +171,6 @@ const (
 )
 
 func TestWaitgroups(test *testing.T) {
-	go func() {
-		time.Sleep(5 * time.Second)
-		test.Fatalf("TestWaitgroups appears to have deadlocked")
-	}()
-
 	promise := Promise()
 
 	var counter uint64 = 0
@@ -194,10 +194,17 @@ func TestWaitgroups(test *testing.T) {
 		promise.Complete(true)
 	})()
 
+	// Wait for all of the promises created to be gathered over the channel.
+	// It's important to only mutate the slice in a single goroutine, so that
+	// happens here.
 	for i := 0; i < WAITERS; i++ {
 		waiterPromises = append(waiterPromises, <-waiterChan)
 	}
 
+	// The promises will now be in varying states of completion, observation
+	// has shown ¼th of the time the final promise will be being completed
+	// while this Get() method is running, causing a race condition whereby
+	// Get() never returned.
 	_, err := All(waiterPromises...).Get()
 
 	if err != nil {

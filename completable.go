@@ -3,22 +3,22 @@ package promise
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
-type State uint8
-
+// Unfortunately there are no atomic operations smaller values than 32
 const (
-	PENDING State = iota
+	PENDING uint32 = iota
 	FULFILLED
 	REJECTED
 )
 
 type CompletablePromise struct {
-	state        State
+	state        uint32
 	cause        error
 	value        interface{}
 	mutex        sync.Mutex
-	waitGroup    sync.WaitGroup
+	cond         *sync.Cond
 	compute      func(interface{}) interface{}
 	handle       func(error)
 	dependencies []Completable
@@ -27,11 +27,11 @@ type CompletablePromise struct {
 func completable(compute func(interface{}) interface{}, handle func(error)) *CompletablePromise {
 	completable := new(CompletablePromise)
 
+	completable.cond = sync.NewCond(&completable.mutex)
 	completable.compute = compute
 	completable.handle = handle
 	completable.state = PENDING
 	completable.dependencies = make([]Completable, 0)
-	completable.waitGroup.Add(1)
 
 	return completable
 }
@@ -42,21 +42,33 @@ func Promise() Completable {
 	return completable(func(x interface{}) interface{} { return x }, nil)
 }
 
+func (promise *CompletablePromise) State() uint32 {
+	return atomic.LoadUint32(&promise.state)
+}
+
 // Determine if the promise has been resolved.
 func (promise *CompletablePromise) Resolved() bool {
-	return promise.state == FULFILLED
+	return promise.State() == FULFILLED
 }
 
 func (promise *CompletablePromise) Rejected() bool {
-	return promise.state == REJECTED
+	return promise.State() == REJECTED
 }
 
 // Return the value of the promise, if it was resolved successfully, or return
 // the cause of failure if it was not. Block until the promise is either
 // completed or rejected.
 func (promise *CompletablePromise) Get() (interface{}, error) {
-	if promise.state == PENDING {
-		promise.waitGroup.Wait()
+	if promise.State() == PENDING {
+		promise.mutex.Lock()
+
+		for promise.State() == PENDING {
+			// wait unlocks its associated mutex (incase you were wondering)
+			// so we cannot guarantee that the state has actually changed.
+			promise.cond.Wait()
+		}
+
+		promise.mutex.Unlock()
 	}
 
 	return promise.value, promise.cause
@@ -73,7 +85,7 @@ func (promise *CompletablePromise) depend(compute func(interface{}) interface{})
 // The private version of this is used for `Combine` to call, so that it won't
 // attempt to acquire the mutex twice.
 func (promise *CompletablePromise) then(compute func(interface{}) interface{}) Thenable {
-	switch promise.state {
+	switch promise.State() {
 	case PENDING:
 		return promise.depend(compute)
 	case REJECTED:
@@ -88,7 +100,7 @@ func (promise *CompletablePromise) then(compute func(interface{}) interface{}) T
 // Compose this promise into one which is complete when the following code has
 // executed.
 func (promise *CompletablePromise) Then(compute func(interface{}) interface{}) Thenable {
-	switch promise.state {
+	switch promise.State() {
 	case PENDING:
 		promise.mutex.Lock()
 
@@ -107,13 +119,13 @@ func (promise *CompletablePromise) Then(compute func(interface{}) interface{}) T
 // Compose this promise into another one which handles an upstream error with
 // the given handler.
 func (promise *CompletablePromise) Catch(handle func(error)) Thenable {
-	if promise.state == PENDING {
+	if promise.State() == PENDING {
 		promise.mutex.Lock()
 
 		defer promise.mutex.Unlock()
 
 		// Double check now that we have the lock that this is still true.
-		if promise.state == PENDING {
+		if promise.State() == PENDING {
 			rejectable := completable(nil, handle)
 
 			promise.dependencies = append(promise.dependencies, rejectable)
@@ -122,7 +134,7 @@ func (promise *CompletablePromise) Catch(handle func(error)) Thenable {
 		}
 	}
 
-	if promise.state == REJECTED {
+	if promise.State() == REJECTED {
 		handle(promise.cause)
 
 		return Rejected(promise.cause)
@@ -146,18 +158,6 @@ func panicStateComplete(rejected bool) {
 }
 
 func (promise *CompletablePromise) complete(value interface{}) interface{} {
-	// Composing the value (performing any necessary mutations) before actually
-	// storing it allows this code to guarantee that even a.Then( func() {
-	// a.Then( ... ) } ) does not cause a deadlock.
-	//
-	// a.Then( func() { a.Get() } ) however, is unstoppable.
-	composed := value
-
-	if promise.compute != nil {
-		// Because this composition function
-		composed = promise.compute(value)
-	}
-
 	// This should rarely actually be blocking, there's a separate mutex for
 	// each completable promise and the mutex is only acquired during assembly
 	// and completion.
@@ -165,13 +165,22 @@ func (promise *CompletablePromise) complete(value interface{}) interface{} {
 
 	defer promise.mutex.Unlock()
 
-	if promise.state != PENDING {
-		panicStateComplete(promise.state == REJECTED)
+	composed := value
+
+	if promise.compute != nil {
+		// Because this composition function
+		composed = promise.compute(value)
+	}
+
+	if promise.State() != PENDING {
+		panicStateComplete(promise.State() == REJECTED)
 	}
 
 	if composed != nil {
 		promise.value = composed
 	}
+
+	atomic.StoreUint32(&promise.state, FULFILLED)
 
 	return composed
 }
@@ -185,16 +194,14 @@ func (promise *CompletablePromise) Complete(value interface{}) {
 	// Completed promise, meaning they will be satisfied immediately.
 	composed := promise.complete(value)
 
-	// Which means that now the wait group can be notified and each of the
-	// subsequent promises can be completed. If this is done while the lock is
-	// held, a deadlock is possible.
-	promise.waitGroup.Done()
+	// So now that the condition has been satisified, broadcast to all waiters
+	// that thie task is now complete. They should be in the `Get()` wait loop,
+	// above.
+	promise.cond.Broadcast()
 
 	for _, dependency := range promise.dependencies {
 		dependency.Complete(composed)
 	}
-
-	promise.state = FULFILLED
 }
 
 // Reject this promise and all of its dependencies.
@@ -207,27 +214,33 @@ func (promise *CompletablePromise) Reject(cause error) {
 
 	promise.mutex.Lock()
 
-	defer promise.mutex.Unlock()
-
-	if promise.state != PENDING {
-		panicStateComplete(promise.state == REJECTED)
+	if promise.State() != PENDING {
+		panicStateComplete(promise.State() == REJECTED)
 	}
 
+	promise.cause = cause
+
+	atomic.StoreUint32(&promise.state, REJECTED)
+
+	promise.mutex.Unlock()
+
+	// Unlike the Complete() routine, which executes the transformation
+	// *before* actually storing the value or transitioning the state, this
+	// transitions after. The reason for that is two-fold: The return value of
+	// the handle() callback is not *stored*, and the second is that we want a
+	// promise accessed from within the Catch() handler to be in a rejected
+	// state.
 	if promise.handle != nil {
 		promise.handle(cause)
 	}
 
-	promise.waitGroup.Done()
+	// Now that this is all done, notify all of the handlers that yeah, we're
+	// done.
+	promise.cond.Broadcast()
 
 	for _, dependency := range promise.dependencies {
 		dependency.Reject(cause)
 	}
-
-	// Due to the fact that this code is a little racey (specifically,
-	// completed is used as a guard), the order of these assignments is
-	// important — specifically, the *completed* flag must be *last*.
-	promise.cause = cause
-	promise.state = FULFILLED
 }
 
 // Combine this promise with another by applying the combinator `create` to the
@@ -236,12 +249,12 @@ func (promise *CompletablePromise) Reject(cause error) {
 // promise which is completed when the returned promise, and this promise, are
 // completed...but no sooner.
 func (promise *CompletablePromise) Combine(create func(interface{}) Thenable) Thenable {
-	if promise.state == PENDING {
+	if promise.State() == PENDING {
 		promise.mutex.Lock()
 
 		defer promise.mutex.Unlock()
 
-		if promise.state == PENDING {
+		if promise.State() == PENDING {
 			// So, this may seem a little whacky, but what is happening here is
 			// that seeing as there is presently no value from which to generate
 			// the new promise, a callback is registered using Then() which
@@ -249,6 +262,12 @@ func (promise *CompletablePromise) Combine(create func(interface{}) Thenable) Th
 			// was returned by *that* transform produces a result, it is copied
 			// over to the placeholder thus satisfying the request.
 			placeholder := Promise()
+
+			// So, is it possible that Combine() is called, and the promise is
+			// completed while it's being combined? Should *not* be.
+			//
+			// Perhaps all access to promise.state should be atomic. We are
+			// using the double lock idiom here, after all...
 
 			// It's important that the internal then() is used here, because the
 			// external one allocates a mutex lock. sync.Mutex is not a reentrant lock
